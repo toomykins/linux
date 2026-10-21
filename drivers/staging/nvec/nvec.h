@@ -141,6 +141,7 @@ struct nvec_chip {
 	struct atomic_notifier_head notifier_list;
 	struct list_head rx_data, tx_data;
 	struct notifier_block nvec_status_notifier;
+	struct input_dev *lid_dev;
 	struct work_struct rx_work, tx_work;
 	struct workqueue_struct *wq;
 	struct nvec_msg msg_pool[NVEC_POOL_SIZE];

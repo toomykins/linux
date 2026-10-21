@@ -18,6 +18,7 @@
 #include <linux/delay.h>
 #include <linux/err.h>
 #include <linux/gpio/consumer.h>
+#include <linux/input.h>
 #include <linux/interrupt.h>
 #include <linux/io.h>
 #include <linux/irq.h>
@@ -71,6 +72,8 @@ enum nvec_sleep_subcmds {
 #define CNF_EVENT_REPORTING 0x01
 #define GET_FIRMWARE_VERSION 0x15
 #define LID_SWITCH BIT(1)
+#define NVEC_SYS_EVT 0x85	/* event source 5 = system (lid, power button) */
+#define GET_SYSTEM_STATUS 0x00
 #define PWR_BUTTON BIT(15)
 
 static struct nvec_chip *nvec_power_handle;
@@ -132,12 +135,38 @@ EXPORT_SYMBOL_GPL(nvec_unregister_notifier);
  * Prints a message about control events not handled in the notifier
  * chain.
  */
+static void nvec_report_lid(struct nvec_chip *nvec, const unsigned char *status)
+{
+	if (!nvec->lid_dev)
+		return;
+	input_report_switch(nvec->lid_dev, SW_LID, !!(status[2] & LID_SWITCH));
+	input_sync(nvec->lid_dev);
+}
+
 static int nvec_status_notifier(struct notifier_block *nb,
 				unsigned long event_type, void *data)
 {
 	struct nvec_chip *nvec = container_of(nb, struct nvec_chip,
 						nvec_status_notifier);
 	unsigned char *msg = data;
+
+	/*
+	 * The system status is a 32-bit word; the event mask uses the same
+	 * bit numbers. A system event carries it as c5 04 <status>, the reply
+	 * to GET_SYSTEM_STATUS (sent every 5 s by nvec_power) as
+	 * 01 <len> 00 00 <status>. Byte 2 of the status holds LID_SWITCH.
+	 */
+	if (event_type == NVEC_SYS_EVT) {
+		if (msg[1] >= 4)
+			nvec_report_lid(nvec, &msg[2]);
+		return NOTIFY_STOP;
+	}
+
+	if (event_type == NVEC_SYS && msg[2] == GET_SYSTEM_STATUS) {
+		if (msg[1] >= 6)
+			nvec_report_lid(nvec, &msg[4]);
+		return NOTIFY_DONE;	/* nvec_power wants it too */
+	}
 
 	if (event_type != NVEC_CNTL)
 		return NOTIFY_DONE;
@@ -423,9 +452,8 @@ static int parse_msg(struct nvec_chip *nvec, struct nvec_msg *msg)
 	}
 
 	if ((msg->data[0] >> 7) == 1 && (msg->data[0] & 0x0f) == 5)
-		print_hex_dump(KERN_WARNING, "ec system event ",
-			       DUMP_PREFIX_NONE, 16, 1, msg->data,
-			       msg->data[1] + 2, true);
+		dev_dbg(nvec->dev, "ec system event %*ph\n",
+			msg->data[1] + 2, msg->data);
 
 	atomic_notifier_call_chain(&nvec->notifier_list, msg->data[0] & 0x8f,
 				   msg->data);
@@ -789,6 +817,7 @@ static int tegra_nvec_probe(struct platform_device *pdev)
 	struct nvec_msg *msg;
 	void __iomem *base;
 	char	get_firmware_version[] = { NVEC_CNTL, GET_FIRMWARE_VERSION },
+		get_system_status[] = { NVEC_SYS, GET_SYSTEM_STATUS },
 		unmute_speakers[] = { NVEC_OEM0, 0x10, 0x59, 0x95 },
 		enable_event[7] = { NVEC_SYS, CNF_EVENT_REPORTING, true };
 
@@ -875,6 +904,28 @@ static int tegra_nvec_probe(struct platform_device *pdev)
 			 msg->data[4], msg->data[5],
 			 msg->data[6], msg->data[7]);
 
+		nvec_msg_free(nvec, msg);
+	}
+
+	/* lid switch, reported by the EC as a system event */
+	nvec->lid_dev = devm_input_allocate_device(dev);
+	if (nvec->lid_dev) {
+		nvec->lid_dev->name = "nvec lid switch";
+		nvec->lid_dev->phys = "nvec/lid";
+		input_set_capability(nvec->lid_dev, EV_SW, SW_LID);
+		if (input_register_device(nvec->lid_dev)) {
+			dev_warn(dev, "could not register lid switch\n");
+			nvec->lid_dev = NULL;
+		}
+	}
+
+	/* the lid may already be closed: no event would tell us */
+	err = nvec_write_sync(nvec, get_system_status, 2, &msg);
+	if (!err) {
+		dev_info(dev, "ec system status %*ph\n",
+			 msg->data[1] + 2, msg->data);
+		if (msg->data[1] >= 6)
+			nvec_report_lid(nvec, &msg->data[4]);
 		nvec_msg_free(nvec, msg);
 	}
 
