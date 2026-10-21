@@ -29,6 +29,22 @@
 		reg = <0x00000000 0x20000000>;
 	};
 
+	reserved-memory {
+		#address-cells = <1>;
+		#size-cells = <1>;
+		ranges;
+
+		/* crash/console log that survives a warm reboot (pstore/ramoops) */
+		ramoops@0f000000 {
+			compatible = "ramoops";
+			reg = <0x0f000000 0x100000>;
+			record-size = <0x8000>;
+			console-size = <0x80000>;
+			pmsg-size = <0x8000>;
+			ecc-size = <16>;
+		};
+	};
+
 	host1x@50000000 {
 		dc@54200000 {
 			rgb {
