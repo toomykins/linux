@@ -56,6 +56,18 @@ static void tegra_bo_put(struct host1x_bo *bo)
 	drm_gem_object_put(&obj->gem);
 }
 
+/*
+ * Buffers that come from dma_alloc_wc() are only ever touched by the CPU
+ * through write-combined mappings, so there is nothing in the CPU caches to
+ * write back or invalidate when the hardware uses them. Without this every
+ * job submitted through the legacy UAPI cleans the caches over the whole of
+ * each buffer it references (megabytes per draw call on Tegra20).
+ */
+static unsigned long tegra_bo_dma_attrs(struct tegra_bo *obj)
+{
+	return (!obj->pages && obj->vaddr) ? DMA_ATTR_SKIP_CPU_SYNC : 0;
+}
+
 static struct host1x_bo_mapping *tegra_bo_pin(struct device *dev, struct host1x_bo *bo,
 					      enum dma_data_direction direction)
 {
@@ -129,7 +141,7 @@ static struct host1x_bo_mapping *tegra_bo_pin(struct device *dev, struct host1x_
 			goto free;
 	}
 
-	err = dma_map_sgtable(dev, map->sgt, direction, 0);
+	err = dma_map_sgtable(dev, map->sgt, direction, tegra_bo_dma_attrs(obj));
 	if (err)
 		goto free_sgt;
 
@@ -165,7 +177,8 @@ static void tegra_bo_unpin(struct host1x_bo_mapping *map)
 						  map->direction);
 		dma_buf_detach(map->attach->dmabuf, map->attach);
 	} else {
-		dma_unmap_sgtable(map->dev, map->sgt, map->direction, 0);
+		dma_unmap_sgtable(map->dev, map->sgt, map->direction,
+				  tegra_bo_dma_attrs(host1x_to_tegra_bo(map->bo)));
 		sg_free_table(map->sgt);
 		kfree(map->sgt);
 	}
